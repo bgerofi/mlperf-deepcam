@@ -1,10 +1,13 @@
 #!/bin/bash
-#SBATCH -A dasrepo
-#SBATCH -J train_cam5
-#SBATCH -t 08:00:00
-#SBATCH -C knl
-#SBATCH -q regular
-#SBATCH -S 2
+#PJM -L "elapse=05:00:00"
+#PJM -L "rscunit=rscunit_ft0"
+#PJM --llio sharedtmp-size=80Gi
+## Stdout and stderr files
+#PJM -o logs/%n.o.%J
+#PJM -e logs/%n.e.%J
+## Jobs statistics
+#PJM --spath logs/%n.s.%J
+#PJM -s
 
 # The MIT License (MIT)
 #
@@ -27,28 +30,56 @@
 # IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-#load stuff
-conda activate mlperf_deepcam
-module load pytorch/v1.4.0
-export PROJ_LIB=/global/homes/t/tkurth/.conda/envs/mlperf_deepcam/share/basemap
-export PYTHONPATH=/global/homes/t/tkurth/.conda/envs/mlperf_deepcam/lib/python3.7/site-packages:${PYTHONPATH}
+if [ -z "${PJM_MPI_PROC}" ] || [ -z "${PJM_PROC_BY_NODE}" ] || [ -z "${PJM_NODE}" ] || [ -z ${PJM_JOBID} ]; then
+	echo "error: you must run this script from a Fujitsu job environment"
+	exit 1
+fi
 
-#ranks per node
-rankspernode=1
-totalranks=$(( ${SLURM_NNODES} * ${rankspernode} ))
+#if [ "${PJM_PROC_BY_NODE}" != "4" ]; then
+#	echo "error: you must request 4 processes per node"
+#	exit 1
+#fi
+
+NUM_NODES=${PJM_NODE}
+NUM_PROCESSES_PER_NODE=${PJM_PROC_BY_NODE}
+NUM_PROCESSES=$(echo ${NUM_PROCESSES_PER_NODE} \* ${NUM_NODES}|bc)
+
+# Do not create empty output files
+export PLE_MPI_STD_EMPTYFILE="off"
+
+#PYTORCH_ROOT=/share/PyTorch-1.7.0/
+PYTORCH_ROOT=${HOME}/PyTorch-1.7.0/
+
+if [ "${PYTORCH_ROOT}" == "/share/PyTorch-1.7.0/" ]; then
+	if [ ! -d ${PYTORCH_ROOT} ]; then
+		if ! time cp ${HOME}/PyTorch-1.7.0.tgz /share/ 2>&1; then
+			echo "error: copying PyTorch"
+			exit 1
+		fi
+
+		if ! time tar zxf /share/PyTorch-1.7.0.tgz -C /share/ 2>&1; then
+			echo "error: uncompressing PyTorch"
+			exit 1
+		fi
+	fi
+fi
+
+. ${PYTORCH_ROOT}/env.sh
 
 #parameters
-run_tag="deepcam_prediction_run1-cori"
-data_dir_prefix="/global/cscratch1/sd/tkurth/data/cam5_data/All-Hist"
-output_dir="/global/cscratch1/sd/tkurth/data/cam5_runs/${run_tag}"
+run_tag="deepcam_prediction_run1-fugaku"
+data_dir_prefix="/vol0004/share/ra000012/DeepCAM/original/All-Hist/"
+output_dir="${HOME}/DeepCAM/runs/nodes-${NUM_NODES}"
 
 #create files
 mkdir -p ${output_dir}
 touch ${output_dir}/train.out
 
 #run training
-srun -u -N ${SLURM_NNODES} -n ${totalranks} -c $(( 256 / ${rankspernode} )) --cpu_bind=cores \
-     python ../train_hdf5_ddp.py \
+echo "Running ${NUM_PROCESSES} rank(s) on ${NUM_NODES} nodes (${NUM_PROCESSES_PER_NODE} processes per node).."
+mpiexec -n ${NUM_PROCESSES} \
+	-x LD_LIBRARY_PATH \
+	python ../train_hdf5_ddp.py \
      --wireup_method "mpi" \
      --run_tag ${run_tag} \
      --data_dir_prefix ${data_dir_prefix} \
@@ -59,7 +90,7 @@ srun -u -N ${SLURM_NNODES} -n ${totalranks} -c $(( 256 / ${rankspernode} )) --cp
      --start_lr 1e-3 \
      --lr_schedule type="multistep",milestones="15000 25000",decay_rate="0.1" \
      --lr_warmup_steps 0 \
-     --lr_warmup_factor $(( ${SLURM_NNODES} / 8 )) \
+     --lr_warmup_factor $(( ${NUM_PROCESSES} / 4 )) \
      --weight_decay 1e-2 \
      --validation_frequency 200 \
      --training_visualization_frequency 200 \
@@ -69,4 +100,4 @@ srun -u -N ${SLURM_NNODES} -n ${totalranks} -c $(( 256 / ${rankspernode} )) --cp
      --save_frequency 400 \
      --max_epochs 200 \
      --amp_opt_level O1 \
-     --local_batch_size 2 |& tee -a ${output_dir}/train.out
+     --local_batch_size 2
