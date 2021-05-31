@@ -22,6 +22,7 @@
 
 # Basics
 import os
+import sys
 import numpy as np
 import argparse as ap
 import datetime as dt
@@ -45,6 +46,9 @@ import torch.optim as optim
 from torch.autograd import Variable
 from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
+
+from torch.backends import mkldnn
+from torch.utils import mkldnn as mkldnn_utils
 
 # Custom
 from utils import utils
@@ -73,7 +77,7 @@ try:
     from apex.parallel import DistributedDataParallel as DDP
     have_apex = True
 except ImportError:
-    from torch.nn.parallel.distributed import DistributedDataParallel as DDP
+    #from torch.nn.parallel.distributed import DistributedDataParallel as DDP
     have_apex = False
 
 #comm wrapper
@@ -121,6 +125,7 @@ def main(pargs):
         #necessary for AMP to work
         torch.cuda.set_device(device)
     else:
+        mkldnn.enabled = True
         device = torch.device("cpu")
 
     #visualize?
@@ -224,7 +229,9 @@ def main(pargs):
         net, optimizer = amp.initialize(net, optimizer, opt_level = pargs.amp_opt_level)
     
     #make model distributed
-    net = DDP(net)
+    #net = DDP(net)
+    #if not torch.cuda.is_available():
+    #    mkldnn_utils.to_mkldnn(net)
 
     #restart from checkpoint if desired
     #if (comm_rank == 0) and (pargs.checkpoint):
@@ -262,6 +269,8 @@ def main(pargs):
     #broadcast model and optimizer state
     steptens = torch.tensor(np.array([start_step, start_epoch]), requires_grad=False).to(device)
     dist.broadcast(steptens, src = 0)
+    if comm_rank == 0:
+        print("Using communication backed: {}".format(dist.get_backend()))
     
     ##broadcast model and optimizer state
     #hvd.broadcast_parameters(net.state_dict(), root_rank = 0)
@@ -347,7 +356,10 @@ def main(pargs):
             # send to device
             inputs = inputs.to(device)
             label = label.to(device)
-            
+
+            #if not torch.cuda.is_available():
+            #    inputs = inputs.to_mkldnn()
+
             # forward pass
             outputs = net.forward(inputs)
             
