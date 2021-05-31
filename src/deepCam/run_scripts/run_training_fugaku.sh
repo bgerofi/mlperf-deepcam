@@ -43,20 +43,23 @@ fi
 NUM_NODES=${PJM_NODE}
 NUM_PROCESSES_PER_NODE=${PJM_PROC_BY_NODE}
 NUM_PROCESSES=$(echo ${NUM_PROCESSES_PER_NODE} \* ${NUM_NODES}|bc)
+export OMP_NUM_THREADS=46
 
 # Do not create empty output files
 export PLE_MPI_STD_EMPTYFILE="off"
 
-#PYTORCH_ROOT=/share/PyTorch-1.7.0/
-PYTORCH_ROOT=${HOME}/PyTorch-1.7.0/
+PYTORCH_ROOT=/share/PyTorch-1.7.0/
+#PYTORCH_ROOT=${HOME}/PyTorch-1.7.0/
 
 if [ "${PYTORCH_ROOT}" == "/share/PyTorch-1.7.0/" ]; then
 	if [ ! -d ${PYTORCH_ROOT} ]; then
+		echo "Copying PyTorch to /share..."
 		if ! time cp ${HOME}/PyTorch-1.7.0.tgz /share/ 2>&1; then
 			echo "error: copying PyTorch"
 			exit 1
 		fi
 
+		echo "Uncompressing PyTorch..."
 		if ! time tar zxf /share/PyTorch-1.7.0.tgz -C /share/ 2>&1; then
 			echo "error: uncompressing PyTorch"
 			exit 1
@@ -69,6 +72,7 @@ fi
 #parameters
 run_tag="deepcam_prediction_run1-fugaku"
 data_dir_prefix="/vol0004/share/ra000012/DeepCAM/original/All-Hist/"
+#data_dir_prefix="/share/DeepCAM"
 output_dir="${HOME}/DeepCAM/runs/nodes-${NUM_NODES}"
 
 #create files
@@ -76,9 +80,10 @@ mkdir -p ${output_dir}
 touch ${output_dir}/train.out
 
 #run training
-echo "Running ${NUM_PROCESSES} rank(s) on ${NUM_NODES} nodes (${NUM_PROCESSES_PER_NODE} processes per node).."
+echo "Nodes: ${NUM_NODES}, MPI ranks: ${NUM_PROCESSES}, ranks/node: ${NUM_PROCESSES_PER_NODE}, OMP threads/rank: ${OMP_NUM_THREADS} .."
 mpiexec -n ${NUM_PROCESSES} \
 	-x LD_LIBRARY_PATH \
+	-x OMP_NUM_THREADS \
 	python ../train_hdf5_ddp.py \
      --wireup_method "mpi" \
      --run_tag ${run_tag} \
@@ -90,7 +95,7 @@ mpiexec -n ${NUM_PROCESSES} \
      --start_lr 1e-3 \
      --lr_schedule type="multistep",milestones="15000 25000",decay_rate="0.1" \
      --lr_warmup_steps 0 \
-     --lr_warmup_factor $(( ${NUM_PROCESSES} / 4 )) \
+     --lr_warmup_factor $(( ${NUM_PROCESSES} / 8 )) \
      --weight_decay 1e-2 \
      --validation_frequency 200 \
      --training_visualization_frequency 200 \
