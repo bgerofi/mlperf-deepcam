@@ -374,8 +374,12 @@ class DeconvUpsampler(nn.Module):
         self.last_deconv = nn.Sequential(nn.ConvTranspose2d(256, n_output, kernel_size=3, stride=2, padding=1, output_padding=(1,1), bias=False))
 
     def forward(self, x, low_level_features, input_size):
+        print("before deconv1 x.size: {}".format(x.size()))
         x = self.deconv1(x)
+        print("before deconv2 x.size: {}".format(x.size()))
         x = self.deconv2(x)
+        print("x.size: {}".format(x.size()))
+        print("low_level_features.size(): {}".format(low_level_features.size()))
         x = torch.cat((x, low_level_features), dim=1)
         x = self.conv1(x)
         x = self.deconv3(x)
