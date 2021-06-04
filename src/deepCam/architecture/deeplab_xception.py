@@ -26,6 +26,20 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.utils.model_zoo as model_zoo
 
+use_mkldnn = True
+single_batch = False
+
+class ToMkldnn(nn.Module):
+    def forward(self, x):
+        if x.is_mkldnn:
+            return x
+        return x.clone().contiguous().to_mkldnn()
+
+class ToDense(nn.Module):
+    def forward(self, x):
+        if not x.is_mkldnn:
+            return x
+        return x.clone().contiguous().to_dense()
 
 
 class SeparableConv2d(nn.Module):
@@ -47,7 +61,10 @@ def fixed_padding(inputs, kernel_size, rate):
     pad_total = kernel_size_effective - 1
     pad_beg = pad_total // 2
     pad_end = pad_total - pad_beg
-    padded_inputs = F.pad(inputs, (pad_beg, pad_end, pad_beg, pad_end))
+    if inputs.is_mkldnn:
+        padded_inputs = F.pad(inputs.to_dense(), (pad_beg, pad_end, pad_beg, pad_end)).to_mkldnn()
+    else:
+        padded_inputs = F.pad(inputs, (pad_beg, pad_end, pad_beg, pad_end))
     return padded_inputs
 
 
@@ -59,8 +76,11 @@ class SeparableConv2d_same(nn.Module):
                                groups=inplanes, bias=bias)
         self.pointwise = nn.Conv2d(inplanes, planes, 1, 1, 0, 1, 1, bias=bias)
 
+        self.kernel_size = self.conv1.kernel_size
+        self.dilation = self.conv1.dilation
+
     def forward(self, x):
-        x = fixed_padding(x, self.conv1.kernel_size[0], rate=self.conv1.dilation[0])
+        x = fixed_padding(x, self.kernel_size[0], rate=self.dilation[0])
         x = self.conv1(x)
         x = self.pointwise(x)
         return x
@@ -349,13 +369,36 @@ class DeconvUpsampler(nn.Module):
         super(DeconvUpsampler, self).__init__()
 
         # deconvs
-        self.deconv1 = nn.Sequential(nn.ConvTranspose2d(256, 256, kernel_size=3, stride=2, padding=1, output_padding=(1,1), bias=False),
-                                     normalizer(256),
-                                     nn.ReLU())
+        if use_mkldnn:
+            self.deconv1 = nn.Sequential(ToDense(),
+                                         nn.ConvTranspose2d(256, 256, kernel_size=3, stride=2, padding=1, output_padding=(1,1), bias=False),
+                                         ToMkldnn(),
+                                         normalizer(256),
+                                         nn.ReLU())
+            self.deconv2 = nn.Sequential(ToDense(),
+                                         nn.ConvTranspose2d(256, 256, kernel_size=3, stride=2, padding=1, output_padding=(1,1), bias=False),
+                                         ToMkldnn(),
+                                         normalizer(256),
+                                         nn.ReLU())
+            #using 128 intermediate channels because of memory requirements
+            self.deconv3 = nn.Sequential(ToDense(),
+                                         nn.ConvTranspose2d(256, 256, kernel_size=3, stride=2, padding=1, output_padding=(1,1), bias=False),
+                                         ToMkldnn(),
+                                         normalizer(256),
+                                         nn.ReLU())
 
-        self.deconv2 = nn.Sequential(nn.ConvTranspose2d(256, 256, kernel_size=3, stride=2, padding=1, output_padding=(1,1), bias=False),
-                                     normalizer(256),
-                                     nn.ReLU())
+        else:
+            self.deconv1 = nn.Sequential(nn.ConvTranspose2d(256, 256, kernel_size=3, stride=2, padding=1, output_padding=(1,1), bias=False),
+                                         normalizer(256),
+                                         nn.ReLU())
+            self.deconv2 = nn.Sequential(nn.ConvTranspose2d(256, 256, kernel_size=3, stride=2, padding=1, output_padding=(1,1), bias=False),
+                                         normalizer(256),
+                                         nn.ReLU())
+            #using 128 intermediate channels because of memory requirements
+            self.deconv3 = nn.Sequential(nn.ConvTranspose2d(256, 256, kernel_size=3, stride=2, padding=1, output_padding=(1,1), bias=False),
+                                         normalizer(256),
+                                         nn.ReLU())
+
 
         self.conv1 = nn.Sequential(nn.Conv2d(304, 256, kernel_size=3, stride=1, padding=1, bias=False),
                                    normalizer(256),
@@ -365,18 +408,24 @@ class DeconvUpsampler(nn.Module):
                                    nn.ReLU(),
                                    nn.Conv2d(256, 256, kernel_size=1, stride=1))
 
-	    #using 128 intermediate channels because of memory requirements
-        self.deconv3 = nn.Sequential(nn.ConvTranspose2d(256, 256, kernel_size=3, stride=2, padding=1, output_padding=(1,1), bias=False),
-                                     normalizer(256),
-                                     nn.ReLU())
-
 	    #no bias or BN on the last deconv
-        self.last_deconv = nn.Sequential(nn.ConvTranspose2d(256, n_output, kernel_size=3, stride=2, padding=1, output_padding=(1,1), bias=False))
+        if use_mkldnn:
+            self.last_deconv = nn.Sequential(ToDense(),
+                                             nn.ConvTranspose2d(256, n_output, kernel_size=3, stride=2, padding=1, output_padding=(1,1), bias=False),
+                                             ToMkldnn())
+        else:
+            self.last_deconv = nn.Sequential(nn.ConvTranspose2d(256, n_output, kernel_size=3, stride=2, padding=1, output_padding=(1,1), bias=False))
 
     def forward(self, x, low_level_features, input_size):
         x = self.deconv1(x)
         x = self.deconv2(x)
-        x = torch.cat((x, low_level_features), dim=1)
+        if x.is_mkldnn:
+            low_level_features_dense = low_level_features
+            if low_level_features.is_mkldnn:
+                low_level_features_dense = low_level_features.to_dense()
+            x = torch.cat((x.to_dense(), low_level_features_dense), dim=1).to_mkldnn()
+        else:
+            x = torch.cat((x, low_level_features), dim=1)
         x = self.conv1(x)
         x = self.deconv3(x)
         x = self.last_deconv(x)
@@ -422,10 +471,15 @@ class DeepLabv3_plus(nn.Module):
 
         self.relu = nn.ReLU()
 
-        self.global_avg_pool = nn.Sequential(nn.AdaptiveAvgPool2d((1, 1)),
-                                             nn.Conv2d(2048, 256, 1, stride=1, bias=False),
-                                             normalizer(256),
-                                             nn.ReLU())
+        if single_batch:
+            self.global_avg_pool = nn.Sequential(nn.AdaptiveAvgPool2d((1, 1)),
+                                                 nn.Conv2d(2048, 256, 1, stride=1, bias=False),
+                                                 nn.ReLU())
+        else:
+            self.global_avg_pool = nn.Sequential(nn.AdaptiveAvgPool2d((1, 1)),
+                                                 nn.Conv2d(2048, 256, 1, stride=1, bias=False),
+                                                 normalizer(256),
+                                                 nn.ReLU())
 
         self.conv1 = nn.Conv2d(1280, 256, 1, bias=False)
         self.bn1 = normalizer(256)
@@ -447,8 +501,20 @@ class DeepLabv3_plus(nn.Module):
         x3 = self.aspp3(x)
         x4 = self.aspp4(x)
         x5 = self.global_avg_pool(x)
+
+        if x1.is_mkldnn:
+            x1 = x1.to_dense()
+            x2 = x2.to_dense()
+            x3 = x3.to_dense()
+            x4 = x4.to_dense()
+            x5 = x5.to_dense()
+
         x5 = F.interpolate(x5, size=x4.size()[2:], mode='bilinear', align_corners=True)
-        x = torch.cat((x1, x2, x3, x4, x5), dim=1)
+
+        if x1.is_mkldnn:
+            x = torch.cat((x1, x2, x3, x4, x5), dim=1).to_mkldnn()
+        else:
+            x = torch.cat((x1, x2, x3, x4, x5), dim=1)
 
         x = self.conv1(x)
         x = self.bn1(x)
