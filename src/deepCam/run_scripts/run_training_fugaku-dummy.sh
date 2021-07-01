@@ -63,6 +63,7 @@ touch ${output_dir}/train.out
 #run training
 echo "Nodes: ${NUM_NODES}, MPI ranks: ${NUM_PROCESSES}, ranks/node: ${NUM_PROCESSES_PER_NODE}, OMP threads/rank: ${OMP_NUM_THREADS} .."
 mpiexec -n ${NUM_PROCESSES} \
+	-x LD_PRELOAD=libtcmalloc.so \
 	-x LD_LIBRARY_PATH \
 	-x OMP_NUM_THREADS \
 	python -u ../train_hdf5_ddp_dummy_single.py \
