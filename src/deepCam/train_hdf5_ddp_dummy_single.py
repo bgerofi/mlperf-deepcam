@@ -128,114 +128,117 @@ def main(pargs):
     logger.log_start(key = "run_start", sync = True)
 
     # training loop
-    while True:
+    with torch.autograd.profiler.profile() as prof:
+        while True:
 
-        # start epoch
-        logger.log_start(key = "epoch_start", metadata = {'epoch_num': epoch+1, 'step_num': step}, sync=True)
+            # start epoch
+            logger.log_start(key = "epoch_start", metadata = {'epoch_num': epoch+1, 'step_num': step}, sync=True)
 
-        # epoch loop
-        #for inputs, label, filename in train_loader:
-        for i in range(10):
-            # send to device
-            inputs = inputs.to(device)
-            label = label.to(device)
-            
-            # forward pass
-            outputs = net.forward(inputs)
-            
-            # Compute loss and average across nodes
-            loss = criterion(outputs.to_dense(), label, weight=class_weights, fpw_1=fpw_1, fpw_2=fpw_2)
-            
-            # Backprop
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-
-            # step counter
-            step += 1
-            
-            if pargs.lr_schedule:
-                current_lr = scheduler.get_last_lr()[0]
-                scheduler.step()
-
-            #log if requested
-            if (step % pargs.logging_frequency == 0):
-
-                # allreduce for loss
-                loss_avg = loss.detach()
-                loss_avg_train = loss_avg.item() / float(comm_size)
-
-                logger.log_event(key = "learning_rate", value = current_lr, metadata = {'epoch_num': epoch+1, 'step_num': step})
-                logger.log_event(key = "train_loss", value = loss_avg_train, metadata = {'epoch_num': epoch+1, 'step_num': step})
-            
-            # validation step if desired
-            if (step % pargs.validation_frequency == 0):
+            # epoch loop
+            #for inputs, label, filename in train_loader:
+            for i in range(10):
+                # send to device
+                inputs = inputs.to(device)
+                label = label.to(device)
                 
-                #eval
-                net.eval()
+                # forward pass
+                outputs = net.forward(inputs)
                 
-                count_sum_val = torch.Tensor([0.]).to(device)
-                loss_sum_val = torch.Tensor([0.]).to(device)
-                iou_sum_val = torch.Tensor([0.]).to(device)
+                # Compute loss and average across nodes
+                loss = criterion(outputs.to_dense(), label, weight=class_weights, fpw_1=fpw_1, fpw_2=fpw_2)
                 
-                # disable gradients
-                with torch.no_grad():
-                
-                    # iterate over validation sample
-                    step_val = 0
-                    # only print once per eval at most
-                    visualized = False
-                    #for inputs_val, label_val, filename_val in validation_loader:
-                    for j in range(10):
-                        
-                        #send to device
-                        inputs_val = inputs_val.to(device)
-                        label_val = label_val.to(device)
-                        
-                        # forward pass
-                        outputs_val = net.forward(inputs_val)
+                # Backprop
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-                        # Compute loss and average across nodes
-                        loss_val = criterion(outputs_val, label_val, weight=class_weights, fpw_1=fpw_1, fpw_2=fpw_2)
-                        loss_sum_val += loss_val
-                        
-                        #increase counter
-                        count_sum_val += 1.
-                        
-                        #increase eval step counter
-                        step_val += 1
-                        
-                        if (pargs.max_validation_steps is not None) and step_val > pargs.max_validation_steps:
-                            break
-                        
-                loss_avg_val = loss_sum_val.item() / count_sum_val.item()
+                # step counter
+                step += 1
                 
-                # print results
-                logger.log_event(key = "eval_loss", value = loss_avg_val, metadata = {'epoch_num': epoch+1, 'step_num': step})
+                if pargs.lr_schedule:
+                    current_lr = scheduler.get_last_lr()[0]
+                    scheduler.step()
 
-                # set to train
-                net.train()
+                #log if requested
+                if (step % pargs.logging_frequency == 0):
+
+                    # allreduce for loss
+                    loss_avg = loss.detach()
+                    loss_avg_train = loss_avg.item() / float(comm_size)
+
+                    logger.log_event(key = "learning_rate", value = current_lr, metadata = {'epoch_num': epoch+1, 'step_num': step})
+                    logger.log_event(key = "train_loss", value = loss_avg_train, metadata = {'epoch_num': epoch+1, 'step_num': step})
+                
+                # validation step if desired
+                if (step % pargs.validation_frequency == 0):
+                    
+                    #eval
+                    net.eval()
+                    
+                    count_sum_val = torch.Tensor([0.]).to(device)
+                    loss_sum_val = torch.Tensor([0.]).to(device)
+                    iou_sum_val = torch.Tensor([0.]).to(device)
+                    
+                    # disable gradients
+                    with torch.no_grad():
+                    
+                        # iterate over validation sample
+                        step_val = 0
+                        # only print once per eval at most
+                        visualized = False
+                        #for inputs_val, label_val, filename_val in validation_loader:
+                        for j in range(10):
+                            
+                            #send to device
+                            inputs_val = inputs_val.to(device)
+                            label_val = label_val.to(device)
+                            
+                            # forward pass
+                            outputs_val = net.forward(inputs_val)
+
+                            # Compute loss and average across nodes
+                            loss_val = criterion(outputs_val, label_val, weight=class_weights, fpw_1=fpw_1, fpw_2=fpw_2)
+                            loss_sum_val += loss_val
+                            
+                            #increase counter
+                            count_sum_val += 1.
+                            
+                            #increase eval step counter
+                            step_val += 1
+                            
+                            if (pargs.max_validation_steps is not None) and step_val > pargs.max_validation_steps:
+                                break
+                            
+                    loss_avg_val = loss_sum_val.item() / count_sum_val.item()
+                    
+                    # print results
+                    logger.log_event(key = "eval_loss", value = loss_avg_val, metadata = {'epoch_num': epoch+1, 'step_num': step})
+
+                    # set to train
+                    net.train()
+                
+                #save model if desired
+                if (pargs.save_frequency > 0) and (step % pargs.save_frequency == 0):
+                    logger.log_start(key = "save_start", metadata = {'epoch_num': epoch+1, 'step_num': step}, sync = True)
+                    if comm_rank == 0:
+                        checkpoint = {
+                            'step': step,
+                            'epoch': epoch,
+                            'model': net.state_dict(),
+                            'optimizer': optimizer.state_dict()
+                        }
+                        torch.save(checkpoint, os.path.join(output_dir, pargs.model_prefix + "_step_" + str(step) + ".cpt") )
+                    logger.log_end(key = "save_stop", metadata = {'epoch_num': epoch+1, 'step_num': step}, sync = True)
+                
+            # log the epoch
+            logger.log_end(key = "epoch_stop", metadata = {'epoch_num': epoch+1, 'step_num': step}, sync = True)
+            epoch += 1
             
-            #save model if desired
-            if (pargs.save_frequency > 0) and (step % pargs.save_frequency == 0):
-                logger.log_start(key = "save_start", metadata = {'epoch_num': epoch+1, 'step_num': step}, sync = True)
-                if comm_rank == 0:
-                    checkpoint = {
-                        'step': step,
-                        'epoch': epoch,
-                        'model': net.state_dict(),
-                        'optimizer': optimizer.state_dict()
-		    }
-                    torch.save(checkpoint, os.path.join(output_dir, pargs.model_prefix + "_step_" + str(step) + ".cpt") )
-                logger.log_end(key = "save_stop", metadata = {'epoch_num': epoch+1, 'step_num': step}, sync = True)
-            
-        # log the epoch
-        logger.log_end(key = "epoch_stop", metadata = {'epoch_num': epoch+1, 'step_num': step}, sync = True)
-        epoch += 1
-        
-        # are we done?
-        if epoch >= pargs.max_epochs:
-            break
+            # are we done?
+            if epoch >= pargs.max_epochs:
+                break
+
+    print(prof.key_averages().table(sort_by="self_cpu_time_total"))
 
     # run done
     logger.log_end(key = "run_stop", sync = True)
